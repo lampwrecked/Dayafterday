@@ -134,7 +134,10 @@ async function mintNft(session, buyerWallet) {
   const meta = session.metadata;
   const date = new Date().toISOString().slice(0, 10);
   const modeName = meta.mode ? meta.mode.charAt(0).toUpperCase() + meta.mode.slice(1) : 'Unknown';
-  const nftName = `Day After Day — ${modeName} — ${date}`;
+  // Metaplex enforces 32 char max on NFT names
+  const shortDate = date.slice(2); // e.g. 26-02-24
+  const shortMode = modeName.slice(0, 10); // truncate mode if needed
+  const nftName = `DAD — ${shortMode} — ${shortDate}`.slice(0, 32);
 
   // Build attributes from questionnaire answers
   const attributes = [];
