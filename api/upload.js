@@ -1,7 +1,7 @@
 // api/upload.js
 // POST /api/upload
-// Receives the media blob (photo/audio/video) and uploads to NFT.Storage (IPFS).
-// Returns the IPFS URI to be embedded in the session metadata.
+// Uploads media to Pinata (IPFS) — reliable free tier
+// Returns IPFS URI for NFT metadata
 
 export const config = {
   api: { bodyParser: false },
@@ -12,8 +12,8 @@ export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
   try {
-    const nftStorageKey = (process.env.NFT_STORAGE_KEY || '').trim();
-    if (!nftStorageKey) throw new Error('NFT_STORAGE_KEY not configured');
+    const pinataJwt = (process.env.PINATA_JWT || '').trim();
+    if (!pinataJwt) throw new Error('PINATA_JWT not configured');
 
     // Parse multipart form data
     const { IncomingForm } = await import('formidable');
@@ -36,66 +36,37 @@ export default async function handler(req, res) {
       ? fields.outputType[0]
       : (fields.outputType || 'video');
 
-    // Log key length to help debug without exposing value
-    console.log('NFT_STORAGE_KEY length:', nftStorageKey.length, 'starts with:', nftStorageKey.slice(0, 8));
+    const ext = mimeType.split('/')[1]?.split(';')[0] || 'bin';
+    const filename = `day-after-day-${Date.now()}.${ext}`;
 
-    let cid = null;
-    let lastError = null;
+    // Upload to Pinata via their pinFileToIPFS endpoint
+    const formData = new FormData();
+    const blob = new Blob([fileBuffer], { type: mimeType });
+    formData.append('file', blob, filename);
+    formData.append('pinataMetadata', JSON.stringify({
+      name: filename,
+      keyvalues: { project: 'day-after-day', artist: 'lampwrecked' }
+    }));
+    formData.append('pinataOptions', JSON.stringify({ cidVersion: 1 }));
 
-    // Attempt 1: NFT.Storage v1 upload endpoint
-    try {
-      const r = await fetch('https://api.nft.storage/upload', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${nftStorageKey}`,
-          'Content-Type': mimeType,
-        },
-        body: fileBuffer,
-      });
-      const d = await r.json();
-      console.log('NFT.Storage response:', JSON.stringify(d).slice(0, 200));
-      if (d.ok && d.value?.cid) {
-        cid = d.value.cid;
-      } else {
-        lastError = JSON.stringify(d);
-      }
-    } catch (e) {
-      lastError = e.message;
-      console.error('NFT.Storage attempt 1 failed:', e.message);
+    const pinRes = await fetch('https://api.pinata.cloud/pinning/pinFileToIPFS', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${pinataJwt}` },
+      body: formData,
+    });
+
+    const pinData = await pinRes.json();
+    console.log('Pinata response:', JSON.stringify(pinData).slice(0, 200));
+
+    if (!pinData.IpfsHash) {
+      throw new Error('Pinata upload failed: ' + JSON.stringify(pinData));
     }
 
-    // Attempt 2: NFT.Storage store endpoint (alternative path)
-    if (!cid) {
-      try {
-        const formData = new FormData();
-        const blob = new Blob([fileBuffer], { type: mimeType });
-        formData.append('file', blob, 'output');
-        const r = await fetch('https://api.nft.storage/store', {
-          method: 'POST',
-          headers: { 'Authorization': `Bearer ${nftStorageKey}` },
-          body: formData,
-        });
-        const d = await r.json();
-        console.log('NFT.Storage store response:', JSON.stringify(d).slice(0, 200));
-        if (d.ok && d.value?.ipnft) {
-          cid = d.value.ipnft;
-        } else {
-          lastError = JSON.stringify(d);
-        }
-      } catch (e) {
-        lastError = e.message;
-        console.error('NFT.Storage attempt 2 failed:', e.message);
-      }
-    }
+    const cid = pinData.IpfsHash;
+    const fileUri = `https://gateway.pinata.cloud/ipfs/${cid}`;
 
     // Clean up temp file
-    try { (await import('fs')).unlinkSync(file.filepath); } catch {}
-
-    if (!cid) {
-      throw new Error('All IPFS upload attempts failed. Last error: ' + lastError);
-    }
-
-    const fileUri = `https://nftstorage.link/ipfs/${cid}`;
+    try { fs.unlinkSync(file.filepath); } catch {}
 
     return res.status(200).json({
       success: true,
