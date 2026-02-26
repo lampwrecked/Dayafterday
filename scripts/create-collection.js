@@ -1,173 +1,149 @@
-/**
- * create-collection.js
- * One-time script to create the Lossy Metaplex certified collection on mainnet.
- *
- * Run from repo root:
- *   node scripts/create-collection.js
- *
- * Requires env vars (copy from Vercel or .env):
- *   MASTER_WALLET_SEED  — BIP39 mnemonic or base58 secret key
- *   SOLANA_RPC_URL      — Helius RPC URL
- *   PINATA_JWT          — Pinata JWT for image + metadata upload
- *
- * Outputs:
- *   Collection mint address — add this as COLLECTION_MINT in Vercel env vars
- */
+// api/create-collection.js
+// ONE-TIME USE — creates the Lossy Metaplex certified collection
+// Hit once, copy the mint address, then DELETE THIS FILE from GitHub
+//
+// Usage:
+//   GET /api/create-collection?secret=lossy2026
+//
+// After running:
+//   1. Copy the collectionMint address from the response
+//   2. Add COLLECTION_MINT=<address> to Vercel env vars
+//   3. Delete this file from GitHub immediately
 
-import fs from 'fs';
-import path from 'path';
-import { fileURLToPath } from 'url';
-import { Connection, Keypair, PublicKey } from '@solana/web3.js';
-import {
-  Metaplex,
-  keypairIdentity,
-  toMetaplexFile,
-} from '@metaplex-foundation/js';
-import fetch from 'node-fetch';
-import FormData from 'form-data';
-import * as bip39 from 'bip39';
-import { derivePath } from 'ed25519-hd-key';
-import bs58 from 'bs58';
+export default async function handler(req, res) {
+  if (req.method === 'OPTIONS') return res.status(200).end();
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-
-// ── Config ──────────────────────────────────────────────────────────────────
-const RPC_URL     = process.env.SOLANA_RPC_URL;
-const PINATA_JWT  = process.env.PINATA_JWT;
-const WALLET_SEED = process.env.MASTER_WALLET_SEED; // mnemonic or base58
-
-const COLLECTION_NAME   = 'Lossy';
-const COLLECTION_SYMBOL = 'LOSSY';
-const COLLECTION_DESC   = 'Lossy. An extension of Day After Day by lampwrecked. The signal persists in spite of decay.';
-const SELLER_FEE_BPS    = 1500; // 15%
-const CREATOR_ADDRESS   = 'FrstHD18pJsFRatk2hnfv4EztP1p87mJ1SL6QyXCcQju';
-const IMAGE_PATH        = path.join(__dirname, '..', 'lossy-collection.jpg');
-
-if (!RPC_URL || !PINATA_JWT || !WALLET_SEED) {
-  console.error('Missing env vars: SOLANA_RPC_URL, PINATA_JWT, MASTER_WALLET_SEED');
-  process.exit(1);
-}
-
-// ── Derive master wallet ─────────────────────────────────────────────────────
-function getMasterKeypair() {
-  try {
-    // Try base58 secret key first
-    const decoded = bs58.decode(WALLET_SEED);
-    if (decoded.length === 64) return Keypair.fromSecretKey(decoded);
-  } catch {}
-  // Fall back to mnemonic
-  const seed = bip39.mnemonicToSeedSync(WALLET_SEED);
-  const { key } = derivePath("m/44'/501'/0'/0'", seed.toString('hex'));
-  return Keypair.fromSeed(key);
-}
-
-// ── Upload to Pinata ─────────────────────────────────────────────────────────
-async function uploadImageToPinata(imagePath) {
-  console.log('Uploading collection image to Pinata...');
-  const imageBytes = fs.readFileSync(imagePath);
-  const form = new FormData();
-  form.append('file', imageBytes, {
-    filename: 'lossy-collection.jpg',
-    contentType: 'image/jpeg',
-  });
-  form.append('pinataMetadata', JSON.stringify({ name: 'Lossy Collection Image' }));
-
-  const res = await fetch('https://api.pinata.cloud/pinning/pinFileToIPFS', {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${PINATA_JWT}`, ...form.getHeaders() },
-    body: form,
-  });
-  const data = await res.json();
-  if (!data.IpfsHash) throw new Error('Image upload failed: ' + JSON.stringify(data));
-  const uri = `https://gateway.pinata.cloud/ipfs/${data.IpfsHash}`;
-  console.log('Image uploaded:', uri);
-  return uri;
-}
-
-async function uploadMetadataToPinata(imageUri) {
-  console.log('Uploading collection metadata to Pinata...');
-  const metadata = {
-    name: COLLECTION_NAME,
-    symbol: COLLECTION_SYMBOL,
-    description: COLLECTION_DESC,
-    image: imageUri,
-    seller_fee_basis_points: SELLER_FEE_BPS,
-    properties: {
-      files: [{ uri: imageUri, type: 'image/jpeg' }],
-      category: 'image',
-      creators: [{ address: CREATOR_ADDRESS, share: 100 }],
-    },
-  };
-
-  const form = new FormData();
-  form.append('file', Buffer.from(JSON.stringify(metadata, null, 2)), {
-    filename: 'lossy-collection-metadata.json',
-    contentType: 'application/json',
-  });
-  form.append('pinataMetadata', JSON.stringify({ name: 'Lossy Collection Metadata' }));
-
-  const res = await fetch('https://api.pinata.cloud/pinning/pinFileToIPFS', {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${PINATA_JWT}`, ...form.getHeaders() },
-    body: form,
-  });
-  const data = await res.json();
-  if (!data.IpfsHash) throw new Error('Metadata upload failed: ' + JSON.stringify(data));
-  const uri = `https://gateway.pinata.cloud/ipfs/${data.IpfsHash}`;
-  console.log('Metadata uploaded:', uri);
-  return uri;
-}
-
-// ── Main ─────────────────────────────────────────────────────────────────────
-async function main() {
-  console.log('\n── Lossy Collection Creator ──\n');
-
-  const keypair = getMasterKeypair();
-  console.log('Master wallet:', keypair.publicKey.toBase58());
-
-  const connection = new Connection(RPC_URL, 'confirmed');
-  const balance = await connection.getBalance(keypair.publicKey);
-  console.log('SOL balance:', balance / 1e9, 'SOL');
-
-  if (balance < 15000000) { // 0.015 SOL minimum
-    console.error('Insufficient SOL. Need at least 0.015 SOL in master wallet.');
-    process.exit(1);
+  // Secret guard — prevents anyone else from triggering this
+  const { secret } = req.query;
+  if (secret !== 'lossy2026') {
+    return res.status(401).json({ error: 'Unauthorized' });
   }
 
-  // Upload image + metadata to Pinata
-  const imageUri    = await uploadImageToPinata(IMAGE_PATH);
-  const metadataUri = await uploadMetadataToPinata(imageUri);
+  try {
+    const { createUmi }        = await import('@metaplex-foundation/umi-bundle-defaults');
+    const { createNft, mplTokenMetadata } = await import('@metaplex-foundation/mpl-token-metadata');
+    const {
+      createSignerFromKeypair,
+      signerIdentity,
+      generateSigner,
+      percentAmount,
+      publicKey: umiPublicKey,
+    } = await import('@metaplex-foundation/umi');
 
-  // Create collection via Metaplex
-  console.log('\nCreating Metaplex collection on mainnet...');
-  const metaplex = Metaplex.make(connection).use(keypairIdentity(keypair));
+    const { getMasterKeypair } = await import('../lib/wallet.js');
 
-  const { nft: collectionNft } = await metaplex.nfts().create({
-    name:                  COLLECTION_NAME,
-    symbol:                COLLECTION_SYMBOL,
-    uri:                   metadataUri,
-    sellerFeeBasisPoints:  SELLER_FEE_BPS,
-    isCollection:          true,
-    creators: [
-      { address: new PublicKey(CREATOR_ADDRESS), share: 100 },
-    ],
-  });
+    const COLLECTION_NAME   = 'Lossy';
+    const COLLECTION_SYMBOL = 'LOSSY';
+    const COLLECTION_DESC   = 'Lossy. An extension of Day After Day by lampwrecked. The signal persists in spite of decay.';
+    const CREATOR_ADDRESS   = 'FrstHD18pJsFRatk2hnfv4EztP1p87mJ1SL6QyXCcQju';
+    const PINATA_JWT        = (process.env.PINATA_JWT || '').trim();
 
-  const collectionMint = collectionNft.address.toBase58();
+    if (!PINATA_JWT) throw new Error('PINATA_JWT not configured');
 
-  console.log('\n✅ Collection created successfully!');
-  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-  console.log('Collection mint address:', collectionMint);
-  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-  console.log('\nNext steps:');
-  console.log('1. Add this to Vercel env vars:');
-  console.log(`   COLLECTION_MINT = ${collectionMint}`);
-  console.log('2. Redeploy Vercel — all future mints will be part of the collection');
-  console.log('3. View on Explorer:');
-  console.log(`   https://explorer.solana.com/address/${collectionMint}`);
+    // ── 1. Upload collection image to Pinata ──────────────────────────────
+    // Fetch the image we already uploaded to the repo via raw GitHub
+    console.log('Fetching collection image...');
+    const imageRes = await fetch(
+      'https://raw.githubusercontent.com/lampwrecked/Lossy/main/lossy-collection.jpg'
+    );
+    if (!imageRes.ok) throw new Error('Could not fetch lossy-collection.jpg from GitHub');
+    const imageBuffer = await imageRes.arrayBuffer();
+    const imageBytes  = new Uint8Array(imageBuffer);
+
+    const imageForm = new FormData();
+    const imageBlob = new Blob([imageBytes], { type: 'image/jpeg' });
+    imageForm.append('file', imageBlob, 'lossy-collection.jpg');
+    imageForm.append('pinataMetadata', JSON.stringify({ name: 'Lossy Collection Image' }));
+    imageForm.append('pinataOptions',  JSON.stringify({ cidVersion: 1 }));
+
+    const imgPinRes  = await fetch('https://api.pinata.cloud/pinning/pinFileToIPFS', {
+      method:  'POST',
+      headers: { Authorization: `Bearer ${PINATA_JWT}` },
+      body:    imageForm,
+    });
+    const imgPinData = await imgPinRes.json();
+    if (!imgPinData.IpfsHash) throw new Error('Image upload failed: ' + JSON.stringify(imgPinData));
+    const imageUri = `https://gateway.pinata.cloud/ipfs/${imgPinData.IpfsHash}`;
+    console.log('Image uploaded:', imageUri);
+
+    // ── 2. Upload collection metadata JSON to Pinata ──────────────────────
+    const collectionMetadata = {
+      name:        COLLECTION_NAME,
+      symbol:      COLLECTION_SYMBOL,
+      description: COLLECTION_DESC,
+      image:       imageUri,
+      seller_fee_basis_points: 1500,
+      properties: {
+        files:    [{ uri: imageUri, type: 'image/jpeg' }],
+        category: 'image',
+        creators: [{ address: CREATOR_ADDRESS, share: 100 }],
+      },
+    };
+
+    const metaForm = new FormData();
+    const metaBlob = new Blob([JSON.stringify(collectionMetadata, null, 2)], { type: 'application/json' });
+    metaForm.append('file', metaBlob, 'lossy-collection-metadata.json');
+    metaForm.append('pinataMetadata', JSON.stringify({ name: 'Lossy Collection Metadata' }));
+    metaForm.append('pinataOptions',  JSON.stringify({ cidVersion: 1 }));
+
+    const metaPinRes  = await fetch('https://api.pinata.cloud/pinning/pinFileToIPFS', {
+      method:  'POST',
+      headers: { Authorization: `Bearer ${PINATA_JWT}` },
+      body:    metaForm,
+    });
+    const metaPinData = await metaPinRes.json();
+    if (!metaPinData.IpfsHash) throw new Error('Metadata upload failed: ' + JSON.stringify(metaPinData));
+    const metadataUri = `https://gateway.pinata.cloud/ipfs/${metaPinData.IpfsHash}`;
+    console.log('Metadata uploaded:', metadataUri);
+
+    // ── 3. Create collection NFT on Solana ────────────────────────────────
+    console.log('Creating collection on mainnet...');
+    const masterKeypair = await getMasterKeypair();
+
+    const umi       = createUmi(process.env.SOLANA_RPC_URL).use(mplTokenMetadata());
+    const umiKp     = umi.eddsa.createKeypairFromSecretKey(masterKeypair.secretKey);
+    const signer    = createSignerFromKeypair(umi, umiKp);
+    umi.use(signerIdentity(signer));
+
+    const collectionMint = generateSigner(umi);
+
+    const { signature } = await createNft(umi, {
+      mint:                 collectionMint,
+      name:                 COLLECTION_NAME,
+      symbol:               COLLECTION_SYMBOL,
+      uri:                  metadataUri,
+      sellerFeeBasisPoints: percentAmount(15, 2),
+      isCollection:         true,
+      creators: [{
+        address:  umiPublicKey(CREATOR_ADDRESS),
+        verified: false,
+        share:    100,
+      }],
+      isMutable: true, // keep mutable so we can verify creators later
+    }).sendAndConfirm(umi);
+
+    const bs58      = await import('bs58');
+    const sigStr    = bs58.default.encode(signature);
+    const mintAddr  = collectionMint.publicKey;
+
+    console.log('Collection created:', mintAddr);
+
+    return res.status(200).json({
+      success:       true,
+      collectionMint: mintAddr,
+      metadataUri,
+      imageUri,
+      signature:     sigStr,
+      explorerUrl:   `https://explorer.solana.com/address/${mintAddr}`,
+      nextSteps: [
+        `1. Add to Vercel env vars: COLLECTION_MINT = ${mintAddr}`,
+        '2. Redeploy Vercel',
+        '3. DELETE api/create-collection.js from GitHub immediately',
+      ],
+    });
+
+  } catch (err) {
+    console.error('Create collection error:', err);
+    return res.status(500).json({ error: err.message });
+  }
 }
-
-main().catch(err => {
-  console.error('Error:', err);
-  process.exit(1);
-});
