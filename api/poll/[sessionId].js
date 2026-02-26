@@ -1,3 +1,4 @@
+
 // api/poll/[sessionId].js
 // GET /api/poll/:sessionId
 // Called by frontend every 5 seconds while mint window is open.
@@ -24,16 +25,11 @@ export default async function handler(req, res) {
   if (!sessionId) return res.status(400).json({ error: 'Missing sessionId' });
 
   try {
-    // Load session
     const session = await redis.getJson(`session:${sessionId}`);
     if (!session) return res.status(404).json({ error: 'Session not found or expired' });
 
-    // Already done
     if (session.status === 'minting') {
-      return res.status(200).json({
-        status: 'minting',
-        message: 'Mint in progress...',
-      });
+      return res.status(200).json({ status: 'minting', message: 'Mint in progress...' });
     }
 
     if (session.status === 'minted') {
@@ -46,16 +42,12 @@ export default async function handler(req, res) {
       });
     }
 
-    // Expired
     if (Date.now() > session.expiresAt) {
       return res.status(200).json({ status: 'expired' });
     }
 
-    // Check USDC balance on derived payment address
     const connection = getConnection();
     const sessionKeypair = await getSessionKeypair(session.sessionIndex);
-
-    // Test mode — skip payment check (add ?test=true to URL)
     const testMode = req.query.test === 'true';
     const balance = testMode ? REQUIRED_USDC : await getUsdcBalance(connection, sessionKeypair.publicKey);
 
@@ -69,46 +61,36 @@ export default async function handler(req, res) {
       });
     }
 
-    // ── Payment confirmed — proceed with mint ──
-    // Atomic lock: set status to 'minting' BEFORE starting mint
-    // This prevents double-mints if two poll requests fire simultaneously
     session.status = 'minting';
     await redis.set(`session:${sessionId}`, session, 60 * 60);
 
-    // Find buyer's wallet from transaction history
     const buyerWallet = await findUsdcSender(connection, sessionKeypair.publicKey);
     session.buyerWallet = buyerWallet;
     await redis.set(`session:${sessionId}`, session, 60 * 60);
 
-    // ── Upload metadata + mint NFT ──
     try {
       const mintResult = await mintNft(session, buyerWallet);
       session.status = 'minted';
       session.mintAddress = mintResult.mintAddress;
       session.mintSignature = mintResult.signature;
-      await redis.set(`session:${sessionId}`, session, 60 * 60 * 24); // keep 24hr
+      await redis.set(`session:${sessionId}`, session, 60 * 60 * 24);
     } catch (mintErr) {
       console.error('Mint error:', mintErr);
-
-      // Detect insufficient SOL — stop retrying, mark as needs_funding
       const errMsg = mintErr.message || String(mintErr);
       const isInsufficientSol = errMsg.includes('insufficient lamports') || errMsg.includes('Insufficient lamports');
 
       if (isInsufficientSol) {
-        // Extract how much is needed
         const match = errMsg.match(/need (\d+)/);
         const needed = match ? (parseInt(match[1]) / 1e9).toFixed(4) : 'unknown';
         session.status = 'needs_funding';
         await redis.set(`session:${sessionId}`, session, 60 * 60 * 24);
-        console.error(`Master wallet out of SOL — needs ${needed} SOL to mint`);
         return res.status(200).json({
           status: 'needs_funding',
-          error: `Master wallet needs more SOL (${needed} SOL required). Payment is safe — mint will complete once funded.`,
+          error: `Master wallet needs more SOL (${needed} SOL required). Payment is safe.`,
           buyerWallet,
         });
       }
 
-      // Any other mint error — keep as 'paid' for manual retry
       session.status = 'paid';
       await redis.set(`session:${sessionId}`, session, 60 * 60 * 24);
       return res.status(200).json({
@@ -119,7 +101,6 @@ export default async function handler(req, res) {
       });
     }
 
-    // ── Sweep USDC + SOL back to master wallet ──
     try {
       const masterKeypair = await getMasterKeypair();
       session.sweepSignature = await sweepUsdc(connection, sessionKeypair, masterKeypair.publicKey);
@@ -128,7 +109,6 @@ export default async function handler(req, res) {
       await redis.set(`session:${sessionId}`, session, 60 * 60 * 24);
     } catch (sweepErr) {
       console.error('Sweep error (non-fatal):', sweepErr);
-      // Sweep failure doesn't affect the buyer — NFT already minted
     }
 
     return res.status(200).json({
@@ -146,7 +126,6 @@ export default async function handler(req, res) {
   }
 }
 
-// ── Internal: upload metadata to NFT.Storage + mint via Metaplex ──
 async function mintNft(session, buyerWallet) {
   const { createUmi } = await import('@metaplex-foundation/umi-bundle-defaults');
   const { createNft, mplTokenMetadata } = await import('@metaplex-foundation/mpl-token-metadata');
@@ -161,16 +140,13 @@ async function mintNft(session, buyerWallet) {
   const { getMasterKeypair } = await import('../../lib/wallet.js');
   const masterKeypair = await getMasterKeypair();
 
-  // Build NFT name from metadata
   const meta = session.metadata;
   const date = new Date().toISOString().slice(0, 10);
   const modeName = meta.mode ? meta.mode.charAt(0).toUpperCase() + meta.mode.slice(1) : 'Unknown';
-  // Metaplex enforces 32 char max on NFT names
-  const shortDate = date.slice(2); // e.g. 26-02-24
-  const shortMode = modeName.slice(0, 10); // truncate mode if needed
-  const nftName = `LOSSY — ${shortMode} — ${shortDate}`.slice(0, 32);
+  const shortDate = date.slice(2);
+  const shortMode = modeName.slice(0, 10);
+  const nftName = `LOSSY -- ${shortMode} -- ${shortDate}`.slice(0, 32);
 
-  // Build attributes from questionnaire answers
   const attributes = [];
   if (meta.answers) {
     const questionLabels = {
@@ -192,12 +168,11 @@ async function mintNft(session, buyerWallet) {
       attributes.push({ trait_type: label, value: String(a) });
     });
   }
-  if (meta.mode)    attributes.push({ trait_type: 'Mode',        value: modeName });
-  if (meta.speed)   attributes.push({ trait_type: 'Speed',       value: String(meta.speed) + 'x' });
+  if (meta.mode) attributes.push({ trait_type: 'Mode', value: modeName });
+  if (meta.speed) attributes.push({ trait_type: 'Speed', value: String(meta.speed) + 'x' });
   if (meta.outputType) attributes.push({ trait_type: 'Output Type', value: session.outputType });
-  if (meta.ghost)      attributes.push({ trait_type: 'Ghost',       value: meta.ghost });
+  if (meta.ghost) attributes.push({ trait_type: 'Ghost', value: meta.ghost });
 
-  // Upload metadata JSON to NFT.Storage (IPFS)
   const metadataJson = {
     name: nftName,
     description: 'Lossy. An extension of Day After Day by lampwrecked. The signal persists in spite of decay.',
@@ -212,14 +187,13 @@ async function mintNft(session, buyerWallet) {
     },
   };
 
-  // Upload metadata JSON to Pinata
   const pinataJwt = (process.env.PINATA_JWT || '').trim();
   if (!pinataJwt) throw new Error('PINATA_JWT not configured');
 
   const metadataBlob = new Blob([JSON.stringify(metadataJson)], { type: 'application/json' });
   const metadataForm = new FormData();
   metadataForm.append('file', metadataBlob, 'metadata.json');
-  metadataForm.append('pinataMetadata', JSON.stringify({ name: `day-after-day-metadata-${Date.now()}.json` }));
+  metadataForm.append('pinataMetadata', JSON.stringify({ name: `lossy-metadata-${Date.now()}.json` }));
   metadataForm.append('pinataOptions', JSON.stringify({ cidVersion: 1 }));
 
   const pinRes = await fetch('https://api.pinata.cloud/pinning/pinFileToIPFS', {
@@ -231,22 +205,17 @@ async function mintNft(session, buyerWallet) {
   if (!pinData.IpfsHash) throw new Error('Pinata metadata upload failed: ' + JSON.stringify(pinData));
   const metadataUri = `https://gateway.pinata.cloud/ipfs/${pinData.IpfsHash}`;
 
-  // Init UMI with master keypair
   const umi = createUmi(process.env.SOLANA_RPC_URL).use(mplTokenMetadata());
   const umiKeypair = umi.eddsa.createKeypairFromSecretKey(masterKeypair.secretKey);
   const signer = createSignerFromKeypair(umi, umiKeypair);
   umi.use(signerIdentity(signer));
 
-  // Generate mint address
   const mint = generateSigner(umi);
 
-  // Determine token owner — buyer's wallet if found, else master wallet
   const tokenOwner = buyerWallet
     ? umiPublicKey(buyerWallet)
     : umiPublicKey(masterKeypair.publicKey.toBase58());
 
-  // Mint NFT
-  // Attach to Metaplex certified collection if COLLECTION_MINT env var is set
   const collectionMintAddr = process.env.COLLECTION_MINT;
   const collectionConfig = collectionMintAddr ? {
     collection: { key: umiPublicKey(collectionMintAddr), verified: false },
@@ -254,14 +223,14 @@ async function mintNft(session, buyerWallet) {
 
   const { signature } = await createNft(umi, {
     mint,
-    name:   nftName,
+    name: nftName,
     symbol: 'LOSSY',
-    uri:    metadataUri,
+    uri: metadataUri,
     sellerFeeBasisPoints: percentAmount(15, 2),
     creators: [{
-      address:  umiPublicKey(process.env.PERSONAL_WALLET_PUBLIC_KEY || 'FrstHD18pJsFRatk2hnfv4EztP1p87mJ1SL6QyXCcQju'),
+      address: umiPublicKey(process.env.PERSONAL_WALLET_PUBLIC_KEY || 'FrstHD18pJsFRatk2hnfv4EztP1p87mJ1SL6QyXCcQju'),
       verified: false,
-      share:    100,
+      share: 100,
     }],
     tokenOwner,
     isMutable: false,
@@ -277,3 +246,4 @@ async function mintNft(session, buyerWallet) {
     metadataUri,
   };
 }
+```
