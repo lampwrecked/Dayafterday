@@ -228,9 +228,9 @@ async function mintNft(session, buyerWallet) {
     uri: metadataUri,
     sellerFeeBasisPoints: percentAmount(15, 2),
     creators: [{
-      address: umiPublicKey(process.env.PERSONAL_WALLET_PUBLIC_KEY || 'FrstHD18pJsFRatk2hnfv4EztP1p87mJ1SL6QyXCcQju'),
-      verified: false,
-      share: 100,
+  address: umiPublicKey(masterKeypair.publicKey.toBase58()),
+  verified: true,
+  share: 100,
     }],
     tokenOwner,
     isMutable: false,
